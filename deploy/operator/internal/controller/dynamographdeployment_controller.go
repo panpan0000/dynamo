@@ -26,6 +26,7 @@ import (
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 
@@ -1987,6 +1988,10 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 			gmsSpec.ExtraClientContainers = append([]string(nil), checkpointConfig.Job.GMSClientContainers...)
 		}
 	}
+	deletionPolicy := nvidiacomv1alpha1.CheckpointDeletionPolicy(checkpointConfig.DeletionPolicy)
+	if deletionPolicy == "" {
+		deletionPolicy = nvidiacomv1alpha1.CheckpointDeletionPolicyDelete
+	}
 	return checkpoint.CreateOrGetAutoCheckpoint(
 		ctx,
 		r.Client,
@@ -2003,8 +2008,60 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		},
 		podTemplate,
 		targetContainerName,
+		deletionPolicy,
 		gmsSpec,
+		dynamoDeployment,
 	)
+}
+
+func (r *DynamoGraphDeploymentReconciler) deleteAutoCheckpointsForDGD(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) error {
+	checkpoints := &nvidiacomv1alpha1.DynamoCheckpointList{}
+	if err := r.List(
+		ctx,
+		checkpoints,
+		client.InNamespace(dgd.Namespace),
+		client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name},
+	); err != nil {
+		return err
+	}
+	for i := range checkpoints.Items {
+		ckpt := &checkpoints.Items[i]
+		if ckpt.Annotations == nil || ckpt.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
+			continue
+		}
+		if ckpt.Annotations[consts.CheckpointDeletionPolicyAnnotation] == string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain) {
+			if err := r.detachRetainedAutoCheckpoint(ctx, ckpt); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := r.Delete(ctx, ckpt); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("delete auto checkpoint %s/%s: %w", ckpt.Namespace, ckpt.Name, err)
+		}
+	}
+	return nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) detachRetainedAutoCheckpoint(
+	ctx context.Context,
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+) error {
+	updated := ckpt.DeepCopy()
+	updated.OwnerReferences = nil
+	if updated.Labels != nil {
+		delete(updated.Labels, consts.KubeLabelDynamoGraphDeploymentName)
+	}
+	if equality.Semantic.DeepEqual(ckpt.OwnerReferences, updated.OwnerReferences) &&
+		equality.Semantic.DeepEqual(ckpt.Labels, updated.Labels) {
+		return nil
+	}
+	if err := r.Patch(ctx, updated, client.MergeFrom(ckpt)); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("detach retained auto checkpoint %s/%s: %w", ckpt.Namespace, ckpt.Name, err)
+	}
+	return nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) checkpointWorkerHashForComponent(dgd *nvidiacomv1beta1.DynamoGraphDeployment, componentName string) (string, error) {
@@ -2366,8 +2423,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileWaitLeaderConfigMap(ctx conte
 }
 
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
-	// for now doing nothing
-	return nil
+	return r.deleteAutoCheckpointsForDGD(ctx, dynamoDeployment)
 }
 
 // SetupWithManager sets up the controller with the Manager.
