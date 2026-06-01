@@ -150,6 +150,21 @@ fn has_complete_wrapper_end(message: &str, config: &JsonParserConfig) -> bool {
         .any(|token| !token.is_empty() && message.contains(token.as_str()))
 }
 
+fn tool_call_markup_start_index(
+    message: &str,
+    start_tokens: &[String],
+    end_tokens: &[String],
+    separator_tokens: &[String],
+) -> Option<usize> {
+    start_tokens
+        .iter()
+        .chain(end_tokens.iter())
+        .chain(separator_tokens.iter())
+        .filter(|token| !token.is_empty())
+        .filter_map(|token| message.find(token.as_str()))
+        .min()
+}
+
 pub fn parse_tool_calls_deepseek_v3(
     message: &str,
     config: &JsonParserConfig,
@@ -178,7 +193,15 @@ pub fn parse_tool_calls_deepseek_v3(
     // Batch parsing requires a complete outer wrapper start; the public
     // detector also accepts partial prefixes for streaming chunk detection.
     if wrapper_start_index(trimmed, config).is_none() {
-        return Ok((vec![], Some(trimmed.to_string())));
+        let normal_text = tool_call_markup_start_index(
+            trimmed,
+            &tool_call_start_tokens,
+            &tool_call_end_tokens,
+            separator_tokens,
+        )
+        .map(|idx| trimmed[..idx].to_string())
+        .unwrap_or_else(|| trimmed.to_string());
+        return Ok((vec![], Some(normal_text)));
     }
 
     let normal_text = normal_text_before_wrapper_start(trimmed, config);
@@ -372,9 +395,9 @@ mod tests {
         );
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.d in tests/parity/toolcalling/fixtures/deepseek_v3/TOOLCALLING.batch.4.yaml.
-    #[test] // TOOLCALLING.batch.4 — recovery from missing start
-    fn test_parse_tool_calls_deepseek_v3_without_tool_call_start_token() {
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.5.b in tests/parity/toolcalling/fixtures/deepseek_v3/TOOLCALLING.batch.5.yaml.
+    #[test] // TOOLCALLING.batch.5.b
+    fn test_parse_tool_calls_deepseek_v3_without_wrapper_start_strips_tool_markup() {
         let text = r#"<｜tool▁call▁begin｜>function宽带}{location": "HongKong"}
 ```json
 }
@@ -384,7 +407,7 @@ mod tests {
             _ => panic!("Expected JSON parser config"),
         };
         let (result, content) = parse_tool_calls_deepseek_v3(text, &config, None).unwrap();
-        assert_eq!(content, Some(text.to_string()));
+        assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 0);
     }
 

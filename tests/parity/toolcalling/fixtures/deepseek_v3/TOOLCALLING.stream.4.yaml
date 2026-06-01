@@ -94,7 +94,11 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id003
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        reason: vLLM preserves the orphan DeepSeek V3 inner tool-call block in normal_text; Dynamo strips it because the required outer wrapper is missing.
         calls: []
         normal_text: |-
           <｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
@@ -104,8 +108,8 @@ cases:
           <｜tool▁call▁end｜>
           <｜tool▁call▁end｜>
           <｜tool▁call▁end｜>
-      vllm: *id003
       sglang:
+        reason: SGLang recovers the orphan DeepSeek V3 inner call without the required outer wrapper; Dynamo requires the wrapper and strips protocol markup.
         calls:
         - arguments:
             location: NYC
