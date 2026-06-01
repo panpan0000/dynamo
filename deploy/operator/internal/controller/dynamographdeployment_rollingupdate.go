@@ -824,9 +824,71 @@ func (r *DynamoGraphDeploymentReconciler) getDesiredWorkerReplicas(
 	return total
 }
 
+type oldWorkerDCDAllocation struct {
+	dcd         *nvidiacomv1beta1.DynamoComponentDeployment
+	currentSpec int32
+	target      int32
+}
+
+func allocateOldWorkerReplicas(
+	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
+	oldNeeded int32,
+) map[*nvidiacomv1beta1.DynamoComponentDeployment]int32 {
+	allocations := make([]oldWorkerDCDAllocation, 0, len(dcds))
+	allocated := int32(0)
+
+	for _, dcd := range dcds {
+		state := dcdComponentStateFromDCD(dcd)
+		target := min(state.Spec, state.Available)
+		allocations = append(allocations, oldWorkerDCDAllocation{
+			dcd:         dcd,
+			currentSpec: state.Spec,
+			target:      target,
+		})
+		allocated += target
+	}
+
+	if surplus := allocated - oldNeeded; surplus > 0 {
+		// Once serving availability exceeds the old target, drain older healthy
+		// generations first, matching Kubernetes Deployment behavior.
+		sort.SliceStable(allocations, func(i, j int) bool {
+			return allocations[i].dcd.CreationTimestamp.Time.Before(allocations[j].dcd.CreationTimestamp.Time)
+		})
+		for i := range allocations {
+			if surplus <= 0 {
+				break
+			}
+			reduced := min(allocations[i].target, surplus)
+			allocations[i].target -= reduced
+			surplus -= reduced
+		}
+	} else if remaining := oldNeeded - allocated; remaining > 0 {
+		// Preserve existing newest-first behavior for non-serving capacity after
+		// all currently available old replicas have been retained.
+		sort.SliceStable(allocations, func(i, j int) bool {
+			return allocations[i].dcd.CreationTimestamp.After(allocations[j].dcd.CreationTimestamp.Time)
+		})
+		for i := range allocations {
+			if remaining <= 0 {
+				break
+			}
+			extraCapacity := allocations[i].currentSpec - allocations[i].target
+			added := min(extraCapacity, remaining)
+			allocations[i].target += added
+			remaining -= added
+		}
+	}
+
+	targets := make(map[*nvidiacomv1beta1.DynamoComponentDeployment]int32, len(allocations))
+	for i := range allocations {
+		targets[allocations[i].dcd] = allocations[i].target
+	}
+	return targets
+}
+
 // scaleOldWorkerDCDs patches the replicas field on old worker DCDs during a rolling update.
-// When multiple old generations exist for the same component, replicas are distributed to the
-// newest old DCD first, with older DCDs drained to 0 (matching K8s Deployment controller behavior).
+// When multiple old generations exist for the same component, unavailable replicas are removed
+// before reducing old generations that are still serving traffic.
 func (r *DynamoGraphDeploymentReconciler) scaleOldWorkerDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -856,23 +918,10 @@ func (r *DynamoGraphDeploymentReconciler) scaleOldWorkerDCDs(
 			continue
 		}
 
-		// Sort by creation time descending (newest first) so newest old DCDs get replicas first
-		sort.Slice(dcds, func(i, j int) bool {
-			return dcds[i].CreationTimestamp.After(dcds[j].CreationTimestamp.Time)
-		})
+		targets := allocateOldWorkerReplicas(dcds, oldNeeded)
 
-		remaining := oldNeeded
 		for _, dcd := range dcds {
-			var desiredReplicas int32
-			if remaining > 0 {
-				currentSpec := int32(1)
-				if dcd.Spec.Replicas != nil {
-					currentSpec = *dcd.Spec.Replicas
-				}
-				// Give this DCD up to its current spec count, but no more than remaining
-				desiredReplicas = min(remaining, currentSpec)
-				remaining -= desiredReplicas
-			}
+			desiredReplicas := targets[dcd]
 
 			currentReplicas := int32(1)
 			if dcd.Spec.Replicas != nil {
