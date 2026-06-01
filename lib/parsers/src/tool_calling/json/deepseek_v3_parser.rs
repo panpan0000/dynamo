@@ -190,26 +190,33 @@ pub fn parse_tool_calls_deepseek_v3(
         return Ok((vec![], Some(trimmed.to_string())));
     }
 
-    // Batch parsing requires a complete outer wrapper start; the public
-    // detector also accepts partial prefixes for streaming chunk detection.
-    if wrapper_start_index(trimmed, config).is_none() {
-        let normal_text = tool_call_markup_start_index(
+    // When the outer wrapper is absent, recover a bare/orphan inner call by
+    // anchoring on the first inner marker, matching deepseek_v3_2/v4.
+    let has_wrapper = wrapper_start_index(trimmed, config).is_some();
+    let normal_text = if has_wrapper {
+        normal_text_before_wrapper_start(trimmed, config)
+    } else {
+        match tool_call_markup_start_index(
             trimmed,
             &tool_call_start_tokens,
             &tool_call_end_tokens,
             separator_tokens,
-        )
-        .map(|idx| trimmed[..idx].to_string())
-        .unwrap_or_else(|| trimmed.to_string());
-        return Ok((vec![], Some(normal_text)));
-    }
+        ) {
+            Some(idx) => trimmed[..idx].to_string(),
+            None => return Ok((vec![], Some(trimmed.to_string()))),
+        }
+    };
 
-    let normal_text = normal_text_before_wrapper_start(trimmed, config);
-
-    // Missing outer end-token recovery is finalize-only. Streaming jail paths
-    // leave allow_eof_recovery=false so they do not release before later calls
-    // or the wrapper end token arrive.
-    if !has_complete_wrapper_end(trimmed, config) && !config.allow_eof_recovery {
+    // Missing end-token recovery is finalize-only; the wrapper waits for its end
+    // token, a bare call for an individual call end token.
+    let has_end_token = if has_wrapper {
+        has_complete_wrapper_end(trimmed, config)
+    } else {
+        tool_call_end_tokens
+            .iter()
+            .any(|token| !token.is_empty() && trimmed.contains(token.as_str()))
+    };
+    if !has_end_token && !config.allow_eof_recovery {
         return Ok((vec![], Some(normal_text)));
     }
 
@@ -256,9 +263,13 @@ pub fn detect_tool_call_start_deepseek_v3(chunk: &str, config: &JsonParserConfig
         return false;
     }
 
+    // Jail on the outer wrapper start OR a bare inner call-begin marker so an
+    // orphan call (no outer wrapper) is still captured instead of leaking.
+    let mut start_tokens = config.tool_call_start_tokens.clone();
+    start_tokens.push("<｜tool▁call▁begin｜>".to_string());
+
     // Check for complete start tokens first
-    let has_complete_token = config
-        .tool_call_start_tokens
+    let has_complete_token = start_tokens
         .iter()
         .any(|token| !token.is_empty() && trimmed.contains(token));
 
@@ -268,7 +279,7 @@ pub fn detect_tool_call_start_deepseek_v3(chunk: &str, config: &JsonParserConfig
 
     // Check for partial start tokens (streaming scenario)
     // This handles cases where start tokens are split across multiple chunks
-    config.tool_call_start_tokens.iter().any(|token| {
+    start_tokens.iter().any(|token| {
         if token.is_empty() {
             return false;
         }
@@ -395,9 +406,8 @@ mod tests {
         );
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.5.b in tests/parity/toolcalling/fixtures/deepseek_v3/TOOLCALLING.batch.5.yaml.
-    #[test] // TOOLCALLING.batch.5.b
-    fn test_parse_tool_calls_deepseek_v3_without_wrapper_start_strips_tool_markup() {
+    #[test] // Orphan inner call without the outer wrapper, but malformed (no separator / invalid JSON): strip.
+    fn test_parse_tool_calls_deepseek_v3_without_wrapper_start_strips_malformed_markup() {
         let text = r#"<｜tool▁call▁begin｜>function宽带}{location": "HongKong"}
 ```json
 }
@@ -409,6 +419,25 @@ mod tests {
         let (result, content) = parse_tool_calls_deepseek_v3(text, &config, None).unwrap();
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 0);
+    }
+
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.5.b in tests/parity/toolcalling/fixtures/deepseek_v3/TOOLCALLING.batch.5.yaml.
+    #[test] // TOOLCALLING.batch.5.b — recover a complete bare/orphan call without the outer wrapper (matches deepseek_v3_2/v4).
+    fn test_parse_tool_calls_deepseek_v3_without_wrapper_start_recovers_complete_call() {
+        let text = r#"<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+```json
+{"location": "NYC"}
+```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
+        let config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config, None).unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "NYC");
     }
 
     // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.a, TOOLCALLING.batch.7.d in tests/parity/toolcalling/fixtures/deepseek_v3/TOOLCALLING.batch.2.yaml, tests/parity/toolcalling/fixtures/deepseek_v3/TOOLCALLING.batch.7.yaml.
@@ -569,15 +598,15 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // helper
-    fn test_detect_tool_call_start_deepseek_v3_chunk_without_tool_call_start_token() {
+    #[test] // helper — a bare inner call-begin marker (no outer wrapper) is still jailed for recovery.
+    fn test_detect_tool_call_start_deepseek_v3_chunk_with_bare_inner_token() {
         let text = r#"<｜tool▁call▁begin｜>function宽带}"#;
         let config = match ToolCallConfig::deepseek_v3().parser_config {
             super::super::config::ParserConfig::Json(cfg) => cfg,
             _ => panic!("Expected JSON parser config"),
         };
         let result = detect_tool_call_start_deepseek_v3(text, &config);
-        assert!(!result);
+        assert!(result);
     }
 
     #[test] // helper
