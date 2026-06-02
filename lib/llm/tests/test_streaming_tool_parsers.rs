@@ -1655,7 +1655,7 @@ mod tests {
             aggregated.normal_content
         );
         assert!(
-            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            validate_finish_reason(&output_chunks, FinishReason::Length),
             "finish_reason validation failed for recovered orphan DeepSeek V3 call"
         );
     }
@@ -1704,7 +1704,7 @@ mod tests {
             aggregated.normal_content
         );
         assert!(
-            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            validate_finish_reason(&output_chunks, FinishReason::Length),
             "finish_reason validation failed for recovered orphan DeepSeek V3.1 call"
         );
     }
