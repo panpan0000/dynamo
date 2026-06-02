@@ -1654,6 +1654,10 @@ mod tests {
             "Orphan tool-call markup must not leak into normal_content. Got: {:?}",
             aggregated.normal_content
         );
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for recovered orphan DeepSeek V3 call"
+        );
     }
 
     #[tokio::test]
@@ -1698,6 +1702,10 @@ mod tests {
             aggregated.normal_content.is_empty(),
             "Orphan tool-call markup must not leak into normal_content. Got: {:?}",
             aggregated.normal_content
+        );
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for recovered orphan DeepSeek V3.1 call"
         );
     }
 }
