@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -740,11 +741,17 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRDoesNotReuseExistingC
 	if err != nil {
 		t.Fatalf("checkpointWorkerHashForComponent() error = %v", err)
 	}
-	expectedName := autoCheckpointName(dgd, "worker", workerHash)
+	expectedID := checkpoint.DGDCheckpointID(
+		dgd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		"worker",
+		workerHash,
+	)
+	expectedName := fmt.Sprintf("checkpoint-%s", expectedID)
 	if ckpt.Name != expectedName {
 		t.Fatalf("createCheckpointCR() returned checkpoint %s, want %s", ckpt.Name, expectedName)
 	}
-	expectedID := autoCheckpointID(dgd, "worker", workerHash)
 	if got := ckpt.Labels[snapshotprotocol.CheckpointIDLabel]; got != expectedID {
 		t.Fatalf("checkpoint ID label = %s, want %s", got, expectedID)
 	}
@@ -1594,7 +1601,13 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeCreatesDGD
 	if err != nil {
 		t.Fatalf("checkpointWorkerHashForComponent() error = %v", err)
 	}
-	expectedName := autoCheckpointName(dgd, "worker", workerHash)
+	expectedName := fmt.Sprintf("checkpoint-%s", checkpoint.DGDCheckpointID(
+		dgd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		"worker",
+		workerHash,
+	))
 	if checkpointStatuses["worker"].CheckpointName != expectedName {
 		t.Fatalf("checkpoint status name = %s, want %s", checkpointStatuses["worker"].CheckpointName, expectedName)
 	}

@@ -1724,7 +1724,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
 			}
-			checkpointName := autoCheckpointName(dynamoDeployment, componentName, workerHash)
+			checkpointID := checkpoint.DGDCheckpointID(
+				dynamoDeployment.Namespace,
+				dynamoDeployment.Name,
+				string(dynamoDeployment.UID),
+				componentName,
+				workerHash,
+			)
+			checkpointName := fmt.Sprintf("checkpoint-%s", checkpointID)
 			refConfig := *alphaCheckpointConfig.DeepCopy()
 			refConfig.CheckpointRef = &checkpointName
 			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, &refConfig)
@@ -1786,23 +1793,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 	return checkpointStatuses, checkpointInfos, nil
 }
 
-func autoCheckpointName(dgd *nvidiacomv1beta1.DynamoGraphDeployment, componentName string, workerHash string) string {
-	return fmt.Sprintf("checkpoint-%s", autoCheckpointID(dgd, componentName, workerHash))
-}
-
-func autoCheckpointID(dgd *nvidiacomv1beta1.DynamoGraphDeployment, componentName string, workerHash string) string {
-	if dgd == nil {
-		return checkpoint.DGDCheckpointID("", "", "", componentName, workerHash)
-	}
-	return checkpoint.DGDCheckpointID(
-		dgd.Namespace,
-		dgd.Name,
-		string(dgd.UID),
-		componentName,
-		workerHash,
-	)
-}
-
 // createCheckpointCR creates a DynamoCheckpoint CR for a component in Auto mode.
 func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	ctx context.Context,
@@ -1819,7 +1809,13 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
 	}
-	checkpointID := autoCheckpointID(dynamoDeployment, componentName, workerHash)
+	checkpointID := checkpoint.DGDCheckpointID(
+		dynamoDeployment.Namespace,
+		dynamoDeployment.Name,
+		string(dynamoDeployment.UID),
+		componentName,
+		workerHash,
+	)
 
 	backendFramework, err := dynamo.BackendFrameworkForComponent(component, dynamoDeployment)
 	if err != nil {
@@ -1837,7 +1833,6 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		return nil, fmt.Errorf("checkpoint backend framework for component %s could not be determined; set spec.backendFramework or use a recognizable worker command", componentName)
 	}
 
-	checkpointIdentity := syntheticCheckpointIdentity(dynamoDeployment, componentName, string(backendFramework), checkpointID)
 	podTemplate, err := r.buildCheckpointJobPodTemplate(
 		dynamoDeployment,
 		component,
@@ -1873,7 +1868,15 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		r.Client,
 		dynamoDeployment.Namespace,
 		checkpointID,
-		checkpointIdentity,
+		nvidiacomv1alpha1.DynamoCheckpointIdentity{
+			Model:            fmt.Sprintf("%s/%s", dynamoDeployment.Namespace, dynamoDeployment.Name),
+			BackendFramework: string(backendFramework),
+			ExtraParameters: map[string]string{
+				"dgdUID":       string(dynamoDeployment.UID),
+				"component":    componentName,
+				"checkpointID": checkpointID,
+			},
+		},
 		podTemplate,
 		targetContainerName,
 		gmsSpec,
@@ -1896,23 +1899,6 @@ func (r *DynamoGraphDeploymentReconciler) checkpointWorkerHashForComponent(dgd *
 		return "", err
 	}
 	return r.activeWorkerHashForDCDGeneration(dgd, desired), nil
-}
-
-func syntheticCheckpointIdentity(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	componentName string,
-	backendFramework string,
-	checkpointID string,
-) nvidiacomv1alpha1.DynamoCheckpointIdentity {
-	return nvidiacomv1alpha1.DynamoCheckpointIdentity{
-		Model:            fmt.Sprintf("%s/%s", dgd.Namespace, dgd.Name),
-		BackendFramework: backendFramework,
-		ExtraParameters: map[string]string{
-			"dgdUID":       string(dgd.UID),
-			"component":    componentName,
-			"checkpointID": checkpointID,
-		},
-	}
 }
 
 // buildCheckpointJobPodTemplate builds a checkpoint job template from the same
